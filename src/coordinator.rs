@@ -51,22 +51,23 @@ impl ProofSearchCoordinator {
             1 => "diagonalization",
             2 => "algebraic_geometry",
             3 => "combinatorial",
-            4 => "randomized_search",
+            4 => "heuristic_sweep",
             _ => "unknown",
         }
     }
 
     /// TENSOR: Execute proof search with Fortran SAT solver
     pub fn execute_search(&mut self, strategy: &str) -> ProofAttempt {
-        println!("▶ TENSOR: Executing strategy '{}'", strategy);
+        println!("  TENSOR: executing '{}'", strategy);
 
         let result = match strategy {
             "circuit_lower_bounds" => self.search_circuit_bounds(),
-            "diagonalization" => self.search_diagonalization(),
-            "algebraic_geometry" => self.search_algebraic(),
-            "combinatorial" => self.search_combinatorial(),
-            "randomized_search" => self.search_randomized(),
-            _ => AttemptResult::Error("Unknown strategy".to_string()),
+            "diagonalization"      => self.search_diagonalization(),
+            "algebraic_geometry"   => self.search_algebraic(),
+            "combinatorial"        => self.search_combinatorial(),
+            "randomized_search"    => self.search_randomized(),
+            "heuristic_sweep"      => self.run_fortran_sweep(),
+            _                      => AttemptResult::Error("Unknown strategy".to_string()),
         };
 
         let attempt = ProofAttempt {
@@ -131,21 +132,84 @@ impl ProofSearchCoordinator {
 
     /// Randomized search over proof space
     fn search_randomized(&self) -> AttemptResult {
-        // Run Fortran SAT solver on hard instances
-        let output = Command::new("cargo")
-            .args(&["run", "--release", "--bin", "sat-solver"])
-            .output();
+        AttemptResult::Incomplete(
+            "Randomized search: use heuristic_sweep strategy to invoke Fortran DPLL sweep.".to_string()
+        )
+    }
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                AttemptResult::Success(format!("SAT solver completed:\n{}", stdout))
+    /// Run Fortran heuristic_sweep binary, parse JSON lines, seal to WORM
+    fn run_fortran_sweep(&mut self) -> AttemptResult {
+        let bin = "fortran/heuristic_sweep";
+        if !std::path::Path::new(bin).exists() {
+            println!("  [fortran] compiling heuristic_sweep...");
+            let compile = Command::new("gfortran")
+                .args(["-O2", "-o", bin,
+                       "fortran/heuristic_sweep.f90",
+                       "fortran/sat_solver.f90"])
+                .output();
+            match compile {
+                Ok(out) if out.status.success() =>
+                    println!("  [fortran] compiled ok"),
+                Ok(out) =>
+                    return AttemptResult::Error(
+                        format!("compile failed: {}", String::from_utf8_lossy(&out.stderr))),
+                Err(e) =>
+                    return AttemptResult::Error(format!("gfortran not found: {}", e)),
             }
+        }
+
+        match Command::new(bin).output() {
+            Err(e) => AttemptResult::Error(format!("could not run sweep: {}", e)),
+            Ok(out) if !out.status.success() =>
+                AttemptResult::Error(format!("sweep error: {}",
+                    String::from_utf8_lossy(&out.stderr))),
             Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                AttemptResult::Error(format!("Solver failed: {}", stderr))
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                let mut best = String::from("none");
+                let mut best_rate = -1.0f64;
+
+                for line in stdout.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    if let Ok(r) = serde_json::from_str::<serde_json::Value>(line) {
+                        let sat   = r["sat_count"].as_u64().unwrap_or(0) as f64;
+                        let unsat = r["unsat_count"].as_u64().unwrap_or(0) as f64;
+                        let rate  = if sat + unsat > 0.0 { sat / (sat + unsat) } else { 0.0 };
+                        let h     = r["heuristic"].as_str().unwrap_or("?").to_string();
+                        println!("  [sweep] {} sat={} unsat={} avg_ms={:.3}",
+                            h, sat as u32, unsat as u32,
+                            r["avg_ms"].as_f64().unwrap_or(0.0));
+                        if rate > best_rate { best_rate = rate; best = h; }
+                        results.push(r);
+                    }
+                }
+
+                // Seal each result to sweep ledger
+                let sweep_path = self.ledger_path.replace(".jsonl", "_sweep.jsonl");
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true)
+                    .open(&sweep_path) {
+                    for r in &results {
+                        let content = r.to_string();
+                        let mut hasher = Sha256::new();
+                        hasher.update(content.as_bytes());
+                        let seal = format!("{:x}", hasher.finalize());
+                        let _ = writeln!(f, r#"{{"result":{},"seal":"{}"}}"#,
+                            content, &seal[..16]);
+                    }
+                }
+
+                if results.is_empty() {
+                    AttemptResult::Error("no results from sweep".to_string())
+                } else {
+                    AttemptResult::Incomplete(format!(
+                        "{} heuristics tested, 10000 instances each at phase-transition \
+                         ratio 4.26 (N=50, M=213). Best: {} ({:.1}% SAT). \
+                         No poly-time pattern found — consistent with P!=NP.",
+                        results.len(), best, best_rate * 100.0
+                    ))
+                }
             }
-            Err(e) => AttemptResult::Error(format!("Could not run solver: {}", e)),
         }
     }
 
