@@ -339,24 +339,18 @@ impl ProofSearchCoordinator {
 }
 
 fn main() {
-    println!("═══════════════════════════════════════════════════════════");
-    println!("  P vs NP Attack: Proof Search Coordinator");
-    println!("═══════════════════════════════════════════════════════════");
-    println!();
+    println!("P vs NP Attack: Proof Search Coordinator");
+    println!("=========================================\n");
 
-    let mut coordinator = ProofSearchCoordinator::new("pnp_worm.jsonl");
+    let mut coordinator = ProofSearchCoordinator::new("worm/pnp_ledger.jsonl");
 
-    // Run multiple search phases
     for phase in 0..10 {
-        println!("\n=== Phase {} ===", phase);
+        println!("=== Phase {} ===", phase);
         let strategy = coordinator.select_strategy(phase);
         coordinator.execute_search(strategy);
+        println!();
     }
 
-    // Print summary
-    println!("\n{}", coordinator.export_summary());
-
-    println!("═══════════════════════════════════════════════════════════");
-    println!("  Search complete. All attempts sealed to WORM ledger.");
-    println!("═══════════════════════════════════════════════════════════");
+    println!("{}", coordinator.export_summary());
+    println!("All attempts sealed to WORM ledger.");
 }
