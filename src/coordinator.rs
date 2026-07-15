@@ -139,7 +139,11 @@ impl ProofSearchCoordinator {
 
     /// Run Fortran heuristic_sweep binary, parse JSON lines, seal to WORM
     fn run_fortran_sweep(&mut self) -> AttemptResult {
-        let bin = "fortran/heuristic_sweep";
+        let bin = if cfg!(windows) {
+            "fortran/heuristic_sweep.exe"
+        } else {
+            "fortran/heuristic_sweep"
+        };
         if !std::path::Path::new(bin).exists() {
             println!("  [fortran] compiling heuristic_sweep...");
             let compile = Command::new("gfortran")
