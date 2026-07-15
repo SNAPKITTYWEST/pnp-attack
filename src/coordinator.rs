@@ -146,10 +146,10 @@ impl ProofSearchCoordinator {
         };
         if !std::path::Path::new(bin).exists() {
             println!("  [fortran] compiling sat_solver module...");
-            // Step 1: compile sat_solver module to object file only (skip test_sat program)
+            // Step 1: compile module-only file (sat_solver_mod.f90 excludes test_sat program)
             let step1 = Command::new("gfortran")
-                .args(["-O2", "-c", "fortran/sat_solver.f90",
-                       "-o", "fortran/sat_solver.o"])
+                .args(["-O2", "-c", "fortran/sat_solver_mod.f90",
+                       "-o", "fortran/sat_solver_mod.o"])
                 .output();
             match step1 {
                 Ok(out) if out.status.success() =>
@@ -160,12 +160,12 @@ impl ProofSearchCoordinator {
                 Err(e) =>
                     return AttemptResult::Error(format!("gfortran not found: {}", e)),
             }
-            // Step 2: compile and link heuristic_sweep against module object
+            // Step 2: link heuristic_sweep against module object (no duplicate main)
             println!("  [fortran] linking heuristic_sweep...");
             let step2 = Command::new("gfortran")
                 .args(["-O2", "-o", bin,
                        "fortran/heuristic_sweep.f90",
-                       "fortran/sat_solver.o"])
+                       "fortran/sat_solver_mod.o"])
                 .output();
             match step2 {
                 Ok(out) if out.status.success() =>
