@@ -1,20 +1,25 @@
 ! P vs NP Attack: Heuristic Sweep
-! Generates random 3-SAT near phase transition (ratio=4.26), tests 4 variable
-! selection heuristics across 10000 instances, outputs one JSON line per heuristic.
-! Compile: gfortran -O2 -o heuristic_sweep heuristic_sweep.f90 sat_solver.f90
-! Usage:   ./heuristic_sweep | tee sweep_results.jsonl
+! Tests 4 DPLL heuristics (random, MOMS, JW, VSIDS) across N_INSTANCES 3-SAT instances.
+! Accepts optional command-line ratio argument (default 4.26).
+! Outputs one JSON line per heuristic including the ratio tested.
+! Compile: gfortran -O2 -o heuristic_sweep heuristic_sweep.f90 sat_solver_mod.o
+! Usage:   ./heuristic_sweep [ratio]   e.g. ./heuristic_sweep 4.0
 
 program heuristic_sweep
     use sat_solver
     implicit none
 
     integer, parameter :: N_VARS       = 50
-    integer, parameter :: N_CLAUSES    = 213   ! ratio 4.26 — phase transition
     integer, parameter :: N_INSTANCES  = 2500  ! per heuristic, 4x = 10000 total
     integer, parameter :: N_HEURISTICS = 4
 
     character(len=6), parameter :: HEUR_NAMES(N_HEURISTICS) = &
         ['random', 'moms  ', 'jw    ', 'vsids ']
+
+    ! Runtime ratio — read from argv or default 4.26
+    real(kind=8) :: ratio
+    integer      :: n_clauses
+    character(len=32) :: arg
 
     integer  :: h, inst_i, c, k, v, var
     logical  :: is_sat
@@ -30,10 +35,18 @@ program heuristic_sweep
     integer(kind=8) :: t0, t1, rate
     real(kind=8)    :: total_ms, avg_ms
 
-    ! scores for MOMS/JW/VSIDS heuristics
     real    :: pos_score(N_VARS), neg_score(N_VARS)
     integer :: best_var
     real    :: best_score, s
+
+    ! Parse ratio from argv[1] if provided
+    ratio = 4.26d0
+    if (command_argument_count() >= 1) then
+        call get_command_argument(1, arg)
+        read(arg, *, iostat=k) ratio
+        if (k /= 0) ratio = 4.26d0
+    end if
+    n_clauses = nint(ratio * real(N_VARS, kind=8))
 
     call system_clock(count_rate=rate)
     call random_seed()
@@ -44,10 +57,10 @@ program heuristic_sweep
         total_ms    = 0.0d0
 
         do inst_i = 1, N_INSTANCES
-            call init_sat(inst, N_VARS, N_CLAUSES)
+            call init_sat(inst, N_VARS, n_clauses)
 
             ! Generate random 3-SAT instance
-            do c = 1, N_CLAUSES
+            do c = 1, n_clauses
                 ntried = 0
                 k      = 0
                 do while (k < 3)
@@ -72,16 +85,11 @@ program heuristic_sweep
                 call add_clause(inst, c, lits, 3)
             end do
 
-            ! Heuristic-specific variable ordering via pre-scoring
-            ! We inject heuristic bias by pre-assigning variable scores
-            ! which influence the first unassigned variable picked in DPLL.
-            ! For random: shuffle assignment order via seeded random.
-            ! For MOMS/JW/VSIDS: score by clause frequency / size weighting.
             select case (h)
-            case (1) ! random — no pre-scoring, DPLL picks first unassigned
-                ! nothing to do
+            case (1) ! random
+                ! nothing
 
-            case (2) ! MOMS: maximum occurrences in minimum size clauses
+            case (2) ! MOMS: max occurrences in minimum-size clauses
                 pos_score = 0.0
                 neg_score = 0.0
                 do c = 1, inst%num_clauses
@@ -97,7 +105,7 @@ program heuristic_sweep
                     end if
                 end do
 
-            case (3) ! JW: Jeroslow-Wang scoring 2^{-|clause|}
+            case (3) ! JW: Jeroslow-Wang 2^{-|clause|}
                 pos_score = 0.0
                 neg_score = 0.0
                 do c = 1, inst%num_clauses
@@ -112,7 +120,7 @@ program heuristic_sweep
                     end do
                 end do
 
-            case (4) ! VSIDS: unit clause frequency (simplified)
+            case (4) ! VSIDS: unit clause frequency
                 pos_score = 0.0
                 neg_score = 0.0
                 do c = 1, inst%num_clauses
@@ -127,8 +135,6 @@ program heuristic_sweep
                 end do
             end select
 
-            ! For scored heuristics: bias the initial assignment order
-            ! by pre-setting the highest-score variable first.
             if (h >= 2) then
                 best_var   = 0
                 best_score = -1.0
@@ -139,7 +145,6 @@ program heuristic_sweep
                         best_var   = var
                     end if
                 end do
-                ! Pre-assign best variable to try true first (DPLL will backtrack if needed)
                 if (best_var > 0) then
                     call init_assignment(assign, N_VARS)
                     assign%values(best_var) = 1
@@ -161,10 +166,10 @@ program heuristic_sweep
 
         avg_ms = total_ms / real(N_INSTANCES, kind=8)
 
-        ! Output JSON line — one per heuristic
-        write(*,'(A,A,A,I0,A,I0,A,F8.4,A)') &
+        write(*,'(A,A,A,F5.2,A,I0,A,I0,A,F8.4,A)') &
             '{"heuristic":"', trim(HEUR_NAMES(h)), &
-            '","sat_count":', sat_count, &
+            '","ratio":', ratio, &
+            ',"sat_count":', sat_count, &
             ',"unsat_count":', unsat_count, &
             ',"avg_ms":', avg_ms, '}'
     end do

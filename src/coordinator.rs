@@ -30,18 +30,31 @@ pub enum AttemptResult {
 
 /// Multi-agent coordinator
 pub struct ProofSearchCoordinator {
-    attempts: Vec<ProofAttempt>,
+    attempts:    Vec<ProofAttempt>,
     ledger_path: String,
     merkle_root: String,
+    ratios:      Vec<f64>,
+    fortran_bin: String,
 }
 
 impl ProofSearchCoordinator {
     pub fn new(ledger_path: &str) -> Self {
         ProofSearchCoordinator {
-            attempts: Vec::new(),
+            attempts:    Vec::new(),
             ledger_path: ledger_path.to_string(),
             merkle_root: "0".repeat(64),
+            ratios:      vec![4.26],
+            fortran_bin: if cfg!(windows) {
+                "fortran/heuristic_sweep.exe".to_string()
+            } else {
+                "fortran/heuristic_sweep".to_string()
+            },
         }
+    }
+
+    pub fn with_ratios(mut self, ratios: Vec<f64>) -> Self {
+        self.ratios = ratios;
+        self
     }
 
     /// ATLAS: Select proof strategy
@@ -139,12 +152,9 @@ impl ProofSearchCoordinator {
 
     /// Run Fortran heuristic_sweep binary, parse JSON lines, seal to WORM
     fn run_fortran_sweep(&mut self) -> AttemptResult {
-        let bin = if cfg!(windows) {
-            "fortran/heuristic_sweep.exe"
-        } else {
-            "fortran/heuristic_sweep"
-        };
-        if !std::path::Path::new(bin).exists() {
+        let bin = self.fortran_bin.clone();
+        let ratios = self.ratios.clone();
+        if !std::path::Path::new(&bin).exists() {
             println!("  [fortran] compiling sat_solver module...");
             // Step 1: compile module-only file (sat_solver_mod.f90 excludes test_sat program)
             let step1 = Command::new("gfortran")
@@ -163,7 +173,7 @@ impl ProofSearchCoordinator {
             // Step 2: link heuristic_sweep against module object (no duplicate main)
             println!("  [fortran] linking heuristic_sweep...");
             let step2 = Command::new("gfortran")
-                .args(["-O2", "-o", bin,
+                .args(["-O2", "-o", &bin,
                        "fortran/heuristic_sweep.f90",
                        "fortran/sat_solver_mod.o"])
                 .output();
@@ -178,58 +188,60 @@ impl ProofSearchCoordinator {
             }
         }
 
-        match Command::new(bin).output() {
-            Err(e) => AttemptResult::Error(format!("could not run sweep: {}", e)),
-            Ok(out) if !out.status.success() =>
-                AttemptResult::Error(format!("sweep error: {}",
-                    String::from_utf8_lossy(&out.stderr))),
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut results: Vec<serde_json::Value> = Vec::new();
-                let mut best = String::from("none");
-                let mut best_rate = -1.0f64;
+        let mut all_results: Vec<serde_json::Value> = Vec::new();
+        let mut best = String::from("none");
+        let mut best_rate = -1.0f64;
 
-                for line in stdout.lines() {
-                    let line = line.trim();
-                    if line.is_empty() { continue; }
-                    if let Ok(r) = serde_json::from_str::<serde_json::Value>(line) {
-                        let sat   = r["sat_count"].as_u64().unwrap_or(0) as f64;
-                        let unsat = r["unsat_count"].as_u64().unwrap_or(0) as f64;
-                        let rate  = if sat + unsat > 0.0 { sat / (sat + unsat) } else { 0.0 };
-                        let h     = r["heuristic"].as_str().unwrap_or("?").to_string();
-                        println!("  [sweep] {} sat={} unsat={} avg_ms={:.3}",
-                            h, sat as u32, unsat as u32,
-                            r["avg_ms"].as_f64().unwrap_or(0.0));
-                        if rate > best_rate { best_rate = rate; best = h; }
-                        results.push(r);
-                    }
-                }
-
-                // Seal each result to sweep ledger
-                let sweep_path = self.ledger_path.replace(".jsonl", "_sweep.jsonl");
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true)
-                    .open(&sweep_path) {
-                    for r in &results {
-                        let content = r.to_string();
-                        let mut hasher = Sha256::new();
-                        hasher.update(content.as_bytes());
-                        let seal = format!("{:x}", hasher.finalize());
-                        let _ = writeln!(f, r#"{{"result":{},"seal":"{}"}}"#,
-                            content, &seal[..16]);
-                    }
-                }
-
-                if results.is_empty() {
-                    AttemptResult::Error("no results from sweep".to_string())
-                } else {
-                    AttemptResult::Incomplete(format!(
-                        "{} heuristics tested, 10000 instances each at phase-transition \
-                         ratio 4.26 (N=50, M=213). Best: {} ({:.1}% SAT). \
-                         No poly-time pattern found — consistent with P!=NP.",
-                        results.len(), best, best_rate * 100.0
-                    ))
+        for ratio in &ratios {
+            let ratio_str = format!("{:.2}", ratio);
+            println!("  [sweep] ratio={}", ratio_str);
+            let out = match Command::new(&bin).arg(&ratio_str).output() {
+                Err(e) => return AttemptResult::Error(format!("could not run sweep: {}", e)),
+                Ok(o) if !o.status.success() =>
+                    return AttemptResult::Error(format!("sweep error: {}",
+                        String::from_utf8_lossy(&o.stderr))),
+                Ok(o) => o,
+            };
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                if let Ok(r) = serde_json::from_str::<serde_json::Value>(line) {
+                    let sat   = r["sat_count"].as_u64().unwrap_or(0) as f64;
+                    let unsat = r["unsat_count"].as_u64().unwrap_or(0) as f64;
+                    let rate  = if sat + unsat > 0.0 { sat / (sat + unsat) } else { 0.0 };
+                    let h     = r["heuristic"].as_str().unwrap_or("?").to_string();
+                    println!("    {} sat={} unsat={} avg_ms={:.3}",
+                        h, sat as u32, unsat as u32,
+                        r["avg_ms"].as_f64().unwrap_or(0.0));
+                    if rate > best_rate { best_rate = rate; best = format!("{}@{}", h, ratio_str); }
+                    all_results.push(r);
                 }
             }
+        }
+
+        // Seal each result to sweep ledger
+        let sweep_path = self.ledger_path.replace(".jsonl", "_sweep.jsonl");
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true)
+            .open(&sweep_path) {
+            for r in &all_results {
+                let content = r.to_string();
+                let mut hasher = Sha256::new();
+                hasher.update(content.as_bytes());
+                let seal = format!("{:x}", hasher.finalize());
+                let _ = writeln!(f, r#"{{"result":{},"seal":"{}"}}"#,
+                    content, &seal[..16]);
+            }
+        }
+
+        if all_results.is_empty() {
+            AttemptResult::Error("no results from sweep".to_string())
+        } else {
+            AttemptResult::Incomplete(format!(
+                "{} results across {} ratios. Best: {} ({:.1}% SAT). \
+                 No poly-time pattern found — consistent with P!=NP.",
+                all_results.len(), ratios.len(), best, best_rate * 100.0
+            ))
         }
     }
 
@@ -339,10 +351,21 @@ impl ProofSearchCoordinator {
 }
 
 fn main() {
-    println!("P vs NP Attack: Proof Search Coordinator");
-    println!("=========================================\n");
+    // Parse optional --ratio a,b,c from argv
+    let args: Vec<String> = std::env::args().collect();
+    let ratios: Vec<f64> = args.windows(2)
+        .find(|w| w[0] == "--ratio")
+        .map(|w| w[1].split(',')
+            .filter_map(|s| s.trim().parse::<f64>().ok())
+            .collect())
+        .unwrap_or_else(|| vec![3.5, 4.0, 4.26, 4.5, 5.0]);
 
-    let mut coordinator = ProofSearchCoordinator::new("worm/pnp_ledger.jsonl");
+    println!("P vs NP Attack: Proof Search Coordinator");
+    println!("=========================================");
+    println!("Ratios: {:?}\n", ratios);
+
+    let mut coordinator = ProofSearchCoordinator::new("worm/pnp_ledger.jsonl")
+        .with_ratios(ratios);
 
     for phase in 0..10 {
         println!("=== Phase {} ===", phase);
