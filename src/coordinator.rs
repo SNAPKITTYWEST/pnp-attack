@@ -145,20 +145,36 @@ impl ProofSearchCoordinator {
             "fortran/heuristic_sweep"
         };
         if !std::path::Path::new(bin).exists() {
-            println!("  [fortran] compiling heuristic_sweep...");
-            let compile = Command::new("gfortran")
-                .args(["-O2", "-o", bin,
-                       "fortran/heuristic_sweep.f90",
-                       "fortran/sat_solver.f90"])
+            println!("  [fortran] compiling sat_solver module...");
+            // Step 1: compile sat_solver module to object file only (skip test_sat program)
+            let step1 = Command::new("gfortran")
+                .args(["-O2", "-c", "fortran/sat_solver.f90",
+                       "-o", "fortran/sat_solver.o"])
                 .output();
-            match compile {
+            match step1 {
                 Ok(out) if out.status.success() =>
-                    println!("  [fortran] compiled ok"),
+                    println!("  [fortran] module compiled ok"),
                 Ok(out) =>
                     return AttemptResult::Error(
-                        format!("compile failed: {}", String::from_utf8_lossy(&out.stderr))),
+                        format!("module compile failed: {}", String::from_utf8_lossy(&out.stderr))),
                 Err(e) =>
                     return AttemptResult::Error(format!("gfortran not found: {}", e)),
+            }
+            // Step 2: compile and link heuristic_sweep against module object
+            println!("  [fortran] linking heuristic_sweep...");
+            let step2 = Command::new("gfortran")
+                .args(["-O2", "-o", bin,
+                       "fortran/heuristic_sweep.f90",
+                       "fortran/sat_solver.o"])
+                .output();
+            match step2 {
+                Ok(out) if out.status.success() =>
+                    println!("  [fortran] linked ok"),
+                Ok(out) =>
+                    return AttemptResult::Error(
+                        format!("link failed: {}", String::from_utf8_lossy(&out.stderr))),
+                Err(e) =>
+                    return AttemptResult::Error(format!("link error: {}", e)),
             }
         }
 
